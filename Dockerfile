@@ -1,32 +1,51 @@
-FROM alpine:latest AS build
+# syntax=docker/dockerfile:1
 
-RUN apk --no-cache add ca-certificates
+ARG GO_VERSION=1.18
+ARG GORELEASER_XX_VERSION=1.5.0
+
+FROM --platform=$BUILDPLATFORM crazymax/goreleaser-xx:${GORELEASER_XX_VERSION} AS goreleaser-xx
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS base
+ENV CGO_ENABLED=0
+COPY --from=goreleaser-xx / /
+RUN apk add --no-cache ca-certificates file git
+WORKDIR /src
+
+FROM base AS vendored
+RUN --mount=type=bind,target=/src,rw \
+  --mount=type=cache,target=/go/pkg/mod \
+  go mod tidy && go mod download
+
+FROM vendored AS build
+# GIT_REF is used by goreleaser-xx to handle the proper git ref when available.
+# It will fallback to the working tree info if empty and use "git tag --points-at"
+# or "git describe" to define the version info.
+ARG GIT_REF
+ARG TARGETPLATFORM
+ARG PKG="github.com/anchore/syft"
+RUN --mount=type=bind,target=. \
+  --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/go/pkg/mod \
+  goreleaser-xx --debug \
+    --name="syft" \
+    --dist="/out" \
+    --flags="-v" \
+    --ldflags="-s -w -X '${PKG}/version.version={{.Version}}' -X '${PKG}/version.gitCommit={{.Commit}}' -X '${PKG}/version.buildDate={{.Date}}' -X '${PKG}/version.gitDescription={{.Summary}}'" \
+    --files="LICENSE" \
+    --files="README.md"
+
+FROM scratch AS artifact
+COPY --from=build /out/*.tar.gz /
+COPY --from=build /out/*.zip /
+COPY --from=build /out/*.sha256 /
+
+FROM scratch AS binary
+COPY --from=build /usr/local/bin/syft* /
 
 FROM scratch
+COPY --from=build /usr/local/bin/syft /syft
 # needed for version check HTTPS request
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-
+COPY --from=base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 # create the /tmp dir, which is needed for image content cache
 WORKDIR /tmp
-
-COPY syft /
-
-ARG BUILD_DATE
-ARG BUILD_VERSION
-ARG VCS_REF
-ARG VCS_URL
-
-LABEL org.opencontainers.image.created=$BUILD_DATE
-LABEL org.opencontainers.image.title="syft"
-LABEL org.opencontainers.image.description="CLI tool and library for generating a Software Bill of Materials from container images and filesystems"
-LABEL org.opencontainers.image.source=$VCS_URL
-LABEL org.opencontainers.image.revision=$VCS_REF
-LABEL org.opencontainers.image.vendor="Anchore, Inc."
-LABEL org.opencontainers.image.version=$BUILD_VERSION
-LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL io.artifacthub.package.readme-url="https://raw.githubusercontent.com/anchore/syft/main/README.md"
-LABEL io.artifacthub.package.logo-url="https://user-images.githubusercontent.com/5199289/136844524-1527b09f-c5cb-4aa9-be54-5aa92a6086c1.png"
-LABEL io.artifacthub.package.license="Apache-2.0"
-      
 
 ENTRYPOINT ["/syft"]
